@@ -394,30 +394,86 @@ func parseLIST(entry string, loc *time.Location, skipSelfParent bool) (os.FileIn
 	return info, nil
 }
 
+type mlstParser struct{}
+
+func parseMLST(entry string, skipSelfParent bool) (os.FileInfo, error) {
+	return mlstParser{}.parse(entry, skipSelfParent)
+}
+
+type mlstToken int
+
+const (
+	mlstFactName mlstToken = iota
+	mlstFactValue
+	mlstFilename
+)
+
+type mlstFacts struct {
+	typ      string
+	unixMode string
+	perm     string
+	size     string
+	sizd     string
+	modify   string
+}
+
 // an entry looks something like this:
 // type=file;size=12;modify=20150216084148;UNIX.mode=0644;unique=1000004g1187ec7; lorem.txt
-func parseMLST(entry string, skipSelfParent bool) (os.FileInfo, error) {
-	parseError := ftpError{err: fmt.Errorf(`failed parsing MLST entry: %s`, entry)}
-	incompleteError := ftpError{err: fmt.Errorf(`MLST entry incomplete: %s`, entry)}
-
-	parts := strings.Split(entry, "; ")
-	if len(parts) != 2 {
-		return nil, parseError
-	}
-
-	facts := make(map[string]string)
-	for _, factPair := range strings.Split(parts[0], ";") {
-		factParts := strings.SplitN(factPair, "=", 2)
-		if len(factParts) != 2 {
-			return nil, parseError
+func (p mlstParser) parse(entry string, skipSelfParent bool) (os.FileInfo, error) {
+	var facts mlstFacts
+	state := mlstFactName
+	var left string // Previous token.
+	var i1 int      // Current token's start position.
+	for i2, r := range entry {
+		switch r {
+		case ';':
+			if state == mlstFactValue {
+				if left == "" {
+					return nil, p.error(entry)
+				}
+				var (
+					key = strings.ToLower(left[:len(left)-1])
+					val = strings.ToLower(entry[i1:i2])
+				)
+				switch key {
+				case "type":
+					facts.typ = val
+				case "unix.mode":
+					facts.unixMode = val
+				case "perm":
+					facts.perm = val
+				case "size":
+					facts.size = val
+				case "sizd":
+					facts.sizd = val
+				case "modify":
+					facts.modify = val
+				}
+				if len(entry) >= i2+1 && entry[i2+1] == ' ' {
+					state = mlstFilename
+				} else {
+					state = mlstFactName
+				}
+				i1 = i2 + 1
+			}
+		case '=':
+			switch state {
+			case mlstFactName:
+				left = entry[i1 : i2+1]
+				i1 = i2 + 1
+				state = mlstFactValue
+			}
 		}
-		facts[strings.ToLower(factParts[0])] = strings.ToLower(factParts[1])
 	}
+	if state != mlstFilename || i1+1 >= len(entry) {
+		return nil, p.error(entry)
+	}
+	filename := entry[i1+1:]
 
-	typ := facts["type"]
+	typ := facts.typ
 
 	if typ == "" {
-		return nil, incompleteError
+		return nil, p.incompleteError(entry)
 	}
 
 	if skipSelfParent && (typ == "cdir" || typ == "pdir" || typ == "." || typ == "..") {
@@ -425,15 +481,15 @@ func parseMLST(entry string, skipSelfParent bool) (os.FileInfo, error) {
 	}
 
 	var mode os.FileMode
-	if facts["unix.mode"] != "" {
-		m, err := strconv.ParseInt(facts["unix.mode"], 8, 32)
+	if facts.unixMode != "" {
+		m, err := strconv.ParseInt(facts.unixMode, 8, 32)
 		if err != nil {
-			return nil, parseError
+			return nil, p.error(entry)
 		}
 		mode = os.FileMode(m)
-	} else if facts["perm"] != "" {
+	} else if facts.perm != "" {
 		// see http://tools.ietf.org/html/rfc3659#section-7.5.5
-		for _, c := range facts["perm"] {
+		for _, c := range facts.perm {
 			switch c {
 			case 'a', 'd', 'c', 'f', 'm', 'p', 'w':
 				// these suggest you have write permissions
@@ -463,29 +519,29 @@ func parseMLST(entry string, skipSelfParent bool) (os.FileInfo, error) {
 		err  error
 	)
 
-	if facts["size"] != "" {
-		size, err = strconv.ParseInt(facts["size"], 10, 64)
-	} else if mode.IsDir() && facts["sizd"] != "" {
-		size, err = strconv.ParseInt(facts["sizd"], 10, 64)
-	} else if facts["type"] == "file" {
-		return nil, incompleteError
+	if facts.size != "" {
+		size, err = strconv.ParseInt(facts.size, 10, 64)
+	} else if mode.IsDir() && facts.sizd != "" {
+		size, err = strconv.ParseInt(facts.sizd, 10, 64)
+	} else if typ == "file" {
+		return nil, p.incompleteError(entry)
 	}
 
 	if err != nil {
-		return nil, parseError
+		return nil, p.error(entry)
 	}
 
-	if facts["modify"] == "" {
-		return nil, incompleteError
+	if facts.modify == "" {
+		return nil, p.incompleteError(entry)
 	}
 
-	mtime, err := time.ParseInLocation(timeFormat, facts["modify"], time.UTC)
-	if err != nil {
-		return nil, incompleteError
+	mtime, ok := p.parseModTime(facts.modify)
+	if !ok {
+		return nil, p.incompleteError(entry)
 	}
 
 	info := &ftpFile{
-		name:  filepath.Base(parts[1]),
+		name:  filepath.Base(filename),
 		size:  size,
 		mtime: mtime,
 		raw:   entry,
@@ -493,4 +549,44 @@ func parseMLST(entry string, skipSelfParent bool) (os.FileInfo, error) {
 	}
 
 	return info, nil
+}
+
+func (p mlstParser) error(entry string) error {
+	return ftpError{err: fmt.Errorf(`failed parsing MLST entry: %s`, entry)}
+}
+
+func (p mlstParser) incompleteError(entry string) error {
+	return ftpError{err: fmt.Errorf(`MLST entry incomplete: %s`, entry)}
+}
+
+func (p *mlstParser) parseModTime(value string) (time.Time, bool) {
+	if len(value) != 14 {
+		return time.Time{}, false
+	}
+	year, err := strconv.ParseUint(value[:4], 10, 16)
+	if err != nil {
+		return time.Time{}, false
+	}
+	month, err := strconv.ParseUint(value[4:6], 10, 8)
+	if err != nil {
+		return time.Time{}, false
+	}
+	day, err := strconv.ParseUint(value[6:8], 10, 8)
+	if err != nil {
+		return time.Time{}, false
+	}
+	hour, err := strconv.ParseUint(value[8:10], 10, 8)
+	if err != nil {
+		return time.Time{}, false
+	}
+	min, err := strconv.ParseUint(value[10:12], 10, 8)
+	if err != nil {
+		return time.Time{}, false
+	}
+	sec, err := strconv.ParseUint(value[12:14], 10, 8)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Date(int(year), time.Month(month), int(day),
+		int(hour), int(min), int(sec), 0, time.UTC), true
 }
