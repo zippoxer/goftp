@@ -305,9 +305,7 @@ Loop:
 
 			pconn, err := c.openConn(idx, host)
 			if err != nil {
-				c.mu.Lock()
 				c.numConnsPerHost[host]--
-				c.mu.Unlock()
 				c.debug("#%d error connecting: %s", idx, err)
 			}
 			return pconn, err
