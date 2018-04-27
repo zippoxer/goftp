@@ -559,6 +559,7 @@ func (p mlstParser) incompleteError(entry string) error {
 	return ftpError{err: fmt.Errorf(`MLST entry incomplete: %s`, entry)}
 }
 
+// parseModTime parses file mtimes formatted as 20060102150405.
 func (p *mlstParser) parseModTime(value string) (time.Time, bool) {
 	if len(value) != 14 {
 		return time.Time{}, false
