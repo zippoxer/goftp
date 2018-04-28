@@ -140,14 +140,23 @@ func (c *Client) readDir(all bool, path string) ([]os.FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer c.returnConn(pconn)
 
 	var (
 		entries []string
 		parser  = parseMLST
 	)
-	if pconn.hasFeature("MLST") {
+	mlst := pconn.hasFeature("MLST")
+	if mlst {
 		entries, err = c.dataStringList(pconn, "MLSD %s", path)
-	} else {
+		if err != nil {
+			if !commandNotSupporterdError(err) {
+				return nil, err
+			}
+			mlst = false
+		}
+	}
+	if !mlst {
 		var cmd string
 		if all {
 			cmd = "LIST -a"
@@ -161,12 +170,6 @@ func (c *Client) readDir(all bool, path string) ([]os.FileInfo, error) {
 		parser = func(entry string, skipSelfParent bool) (os.FileInfo, error) {
 			return parseLIST(entry, c.config.ServerLocation, skipSelfParent)
 		}
-	}
-
-	c.returnConn(pconn)
-
-	if err != nil {
-		return nil, err
 	}
 
 	var ret []os.FileInfo
@@ -201,13 +204,15 @@ func (c *Client) Stat(path string) (os.FileInfo, error) {
 
 	if pconn.hasFeature("MLST") {
 		lines, err := c.controlStringList(pconn, "MLST %s", path)
-		if err != nil {
+		if err == nil {
+			if len(lines) != 3 {
+				return nil, ftpError{err: fmt.Errorf("unexpected MLST response: %v", lines)}
+			}
+			return parseMLST(strings.TrimLeft(lines[1], " "), false)
+		}
+		if !commandNotSupporterdError(err) {
 			return nil, err
 		}
-		if len(lines) != 3 {
-			return nil, ftpError{err: fmt.Errorf("unexpected MLST response: %v", lines)}
-		}
-		return parseMLST(strings.TrimLeft(lines[1], " "), false)
 	}
 
 	lines, err := c.dataStringList(pconn, "LIST %s", path)
