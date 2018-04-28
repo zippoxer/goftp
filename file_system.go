@@ -125,6 +125,17 @@ func commandNotSupporterdError(err error) bool {
 // be used. You may have to set ServerLocation in your config to get (more)
 // accurate ModTimes in this case.
 func (c *Client) ReadDir(path string) ([]os.FileInfo, error) {
+	return c.readDir(false, path)
+}
+
+// ReadDirAll lists a directory like ReadDir, but forces the server to
+// reveal hidden files. ReadDirAll is unsafe, only call it if you know
+// the server supports the command "LIST -a".
+func (c *Client) ReadDirAll(path string) ([]os.FileInfo, error) {
+	return c.readDir(true, path)
+}
+
+func (c *Client) readDir(all bool, path string) ([]os.FileInfo, error) {
 	pconn, err := c.getIdleConn()
 	if err != nil {
 		return nil, err
@@ -137,7 +148,13 @@ func (c *Client) ReadDir(path string) ([]os.FileInfo, error) {
 	if pconn.hasFeature("MLST") {
 		entries, err = c.dataStringList(pconn, "MLSD %s", path)
 	} else {
-		entries, err = c.dataStringList(pconn, "LIST %s", path)
+		var cmd string
+		if all {
+			cmd = "LIST -a"
+		} else {
+			cmd = "LIST"
+		}
+		entries, err = c.dataStringList(pconn, "%s %s", cmd, path)
 		if err != nil {
 			return nil, err
 		}
